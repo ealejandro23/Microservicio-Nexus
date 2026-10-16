@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: nexus_retail
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: nexus
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexus -d nexus_retail"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  dominio:
+    build: ./dominio
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: nexus_retail
+      DB_USER: nexus
+      DB_PASSWORD: nexus
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Script de una sola ejecución: no arranca con "up".
+  # Se ejecuta con: docker compose run --rm carga
+  carga:
+    build: ./carga
+    profiles: ["carga"]
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: nexus_retail
+      DB_USER: nexus
+      DB_PASSWORD: nexus
+      DATA_DIR: /app/datos
+    volumes:
+      - ./carga/datos:/app/datos:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
