@@ -177,31 +177,50 @@ def crear_prediccion(payload: dict[str, Any]) -> dict[str, Any]:
     if user is None:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
+    # Join transacciones with productos to get categoria
     try:
         with get_connection() as connection:
             with connection.cursor() as cursor:
+                # Features per-category
                 cursor.execute(
-                    "SELECT COUNT(*) FROM transacciones WHERE usuario_id = %s AND LOWER(TRIM(estado)) = 'pagado'",
-                    (usuario_id,),
+                    """SELECT COUNT(*) FROM transacciones t
+                       JOIN productos p ON t.sku = p.sku
+                       WHERE t.usuario_id = %s AND LOWER(TRIM(t.estado)) = 'pagado'
+                         AND LOWER(TRIM(p.categoria)) = LOWER(TRIM(%s))""",
+                    (usuario_id, categoria),
                 )
                 num_compras = cursor.fetchone()[0] or 0
                 cursor.execute(
-                    "SELECT COALESCE(SUM(total), 0) FROM transacciones WHERE usuario_id = %s AND LOWER(TRIM(estado)) = 'pagado'",
-                    (usuario_id,),
+                    """SELECT COALESCE(SUM(t.total), 0) FROM transacciones t
+                       JOIN productos p ON t.sku = p.sku
+                       WHERE t.usuario_id = %s AND LOWER(TRIM(t.estado)) = 'pagado'
+                         AND LOWER(TRIM(p.categoria)) = LOWER(TRIM(%s))""",
+                    (usuario_id, categoria),
                 )
                 total_gastado = float(cursor.fetchone()[0] or 0)
-                if total_gastado != total_gastado:  # NaN check
+                if total_gastado != total_gastado:
                     total_gastado = 0.0
                 cursor.execute(
-                    "SELECT MAX(fecha) FROM transacciones WHERE usuario_id = %s AND LOWER(TRIM(estado)) = 'pagado'",
-                    (usuario_id,),
+                    """SELECT MAX(t.fecha) FROM transacciones t
+                       JOIN productos p ON t.sku = p.sku
+                       WHERE t.usuario_id = %s AND LOWER(TRIM(t.estado)) = 'pagado'
+                         AND LOWER(TRIM(p.categoria)) = LOWER(TRIM(%s))""",
+                    (usuario_id, categoria),
                 )
                 ultima = cursor.fetchone()[0]
+                # Overall user stats
                 cursor.execute(
                     "SELECT COUNT(DISTINCT pedido_id) FROM transacciones WHERE usuario_id = %s AND LOWER(TRIM(estado)) = 'pagado'",
                     (usuario_id,),
                 )
                 frecuencia = cursor.fetchone()[0] or 0
+                cursor.execute(
+                    "SELECT COALESCE(AVG(total), 0) FROM transacciones WHERE usuario_id = %s AND LOWER(TRIM(estado)) = 'pagado'",
+                    (usuario_id,),
+                )
+                ticket_promedio_raw = float(cursor.fetchone()[0] or 0)
+                if ticket_promedio_raw != ticket_promedio_raw:
+                    ticket_promedio_raw = 0.0
     except psycopg2.Error as exc:
         raise HTTPException(status_code=503, detail="No fue posible calcular features") from exc
 
@@ -210,7 +229,7 @@ def crear_prediccion(payload: dict[str, Any]) -> dict[str, Any]:
         dias_ultima = (_dt.datetime.now() - ultima).days
     else:
         dias_ultima = 999
-    ticket_promedio = (total_gastado / num_compras) if num_compras > 0 else 0.0
+    ticket_promedio = ticket_promedio_raw if ticket_promedio_raw > 0 else 0.0
 
     features = {
         "num_compras_categoria": num_compras,
