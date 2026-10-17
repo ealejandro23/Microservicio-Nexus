@@ -190,6 +190,8 @@ def crear_prediccion(payload: dict[str, Any]) -> dict[str, Any]:
                     (usuario_id,),
                 )
                 total_gastado = float(cursor.fetchone()[0] or 0)
+                if total_gastado != total_gastado:  # NaN check
+                    total_gastado = 0.0
                 cursor.execute(
                     "SELECT MAX(fecha) FROM transacciones WHERE usuario_id = %s AND LOWER(TRIM(estado)) = 'pagado'",
                     (usuario_id,),
