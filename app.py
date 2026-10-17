@@ -269,7 +269,7 @@ def crear_prediccion(payload: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "probabilidad_compra": prob,
-        "prediccion": 1 if prob >= 0.5 else 0,
+        "prediccion": 1 if prob >= 0.6 else 0,
         "version_modelo": version_modelo,
         "prediccion_id": pred_id,
         "instancia": None,
