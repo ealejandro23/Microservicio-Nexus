@@ -257,6 +257,90 @@ def crear_prediccion(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# =============================================================================
+# METRICAS / DASHBOARD
+# =============================================================================
+
+@app.get("/metricas")
+def metricas_dashboard() -> dict[str, Any]:
+    try:
+        with get_connection() as connection:
+            with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                # Conteos generales
+                cursor.execute("SELECT COUNT(*) AS n FROM usuarios")
+                total_usuarios = cursor.fetchone()["n"]
+                cursor.execute("SELECT COUNT(*) AS n FROM productos")
+                total_productos = cursor.fetchone()["n"]
+                cursor.execute("SELECT COUNT(*) AS n FROM transacciones")
+                total_transacciones = cursor.fetchone()["n"]
+                cursor.execute("SELECT COUNT(*) AS n FROM predicciones")
+                total_predicciones = cursor.fetchone()["n"]
+
+                # Distribucion de propension
+                cursor.execute(
+                    "SELECT propension, COUNT(*) AS n FROM predicciones GROUP BY propension"
+                )
+                propension_dist = {r["propension"]: r["n"] for r in cursor.fetchall()}
+
+                # Usuarios por region (top 10)
+                cursor.execute(
+                    "SELECT region, COUNT(*) AS n FROM usuarios GROUP BY region ORDER BY n DESC LIMIT 10"
+                )
+                regiones = [{"region": r["region"], "n": r["n"]} for r in cursor.fetchall()]
+
+                # Categorias de productos
+                cursor.execute(
+                    "SELECT categoria, COUNT(*) AS n FROM productos WHERE activo IS TRUE GROUP BY categoria ORDER BY n DESC"
+                )
+                categorias = [{"categoria": r["categoria"], "n": r["n"]} for r in cursor.fetchall()]
+
+                # Transacciones por estado
+                cursor.execute(
+                    "SELECT estado, COUNT(*) AS n FROM transacciones GROUP BY estado ORDER BY n DESC"
+                )
+                estados = [{"estado": r["estado"], "n": r["n"]} for r in cursor.fetchall()]
+
+                # Ultimas predicciones
+                cursor.execute(
+                    "SELECT usuario_id, categoria, prediccion, propension, fecha FROM predicciones ORDER BY fecha DESC LIMIT 10"
+                )
+                ultimas = [dict(r) for r in cursor.fetchall()]
+                for u in ultimas:
+                    if u.get("fecha"):
+                        u["fecha"] = str(u["fecha"])
+
+                # Promedio de probabilidad
+                cursor.execute("SELECT COALESCE(AVG(prediccion), 0) AS avg FROM predicciones")
+                avg_prob = float(cursor.fetchone()["avg"] or 0)
+                if avg_prob != avg_prob:
+                    avg_prob = 0.0
+
+                # Top productos por transacciones
+                cursor.execute(
+                    "SELECT p.categoria, COUNT(*) AS n FROM transacciones t JOIN productos p ON t.sku = p.sku GROUP BY p.categoria ORDER BY n DESC LIMIT 8"
+                )
+                top_cats_tx = [{"categoria": r["categoria"], "n": r["n"]} for r in cursor.fetchall()]
+
+    except psycopg2.Error as exc:
+        raise HTTPException(status_code=503, detail="No fue posible consultar metricas") from exc
+
+    return {
+        "totales": {
+            "usuarios": total_usuarios,
+            "productos": total_productos,
+            "transacciones": total_transacciones,
+            "predicciones": total_predicciones,
+        },
+        "propension": propension_dist,
+        "probabilidad_promedio": round(avg_prob, 4),
+        "regiones": regiones,
+        "categorias_productos": categorias,
+        "estados_transacciones": estados,
+        "top_categorias_transacciones": top_cats_tx,
+        "ultimas_predicciones": ultimas,
+    }
+
+
 @app.get("/api/recomendaciones")
 def recomendaciones(
     usuario_id: str | None = Query(default=None, min_length=1),
