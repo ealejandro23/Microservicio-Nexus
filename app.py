@@ -147,7 +147,7 @@ def historial_usuario(usuario_id: str) -> list[dict[str, Any]]:
         with get_connection() as connection:
             with connection.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute(
-                    "SELECT sku, fecha, cantidad, total, estado FROM transacciones WHERE usuario_id = %s ORDER BY fecha DESC LIMIT 20",
+                    "SELECT t.sku, p.nombre AS producto, p.categoria, t.fecha, t.cantidad, t.total, t.estado FROM transacciones t LEFT JOIN productos p ON t.sku = p.sku WHERE t.usuario_id = %s ORDER BY t.fecha DESC LIMIT 20",
                     (usuario_id,),
                 )
                 rows = cursor.fetchall()
@@ -232,10 +232,8 @@ def crear_prediccion(payload: dict[str, Any]) -> dict[str, Any]:
     ticket_promedio = ticket_promedio_raw if ticket_promedio_raw > 0 else 0.0
 
     features = {
-        "num_compras_categoria": num_compras,
         "num_vistas_categoria": 0,
         "num_clics_categoria": 0,
-        "total_gastado_categoria": total_gastado,
         "dias_ultima_compra": max(dias_ultima, 0),
         "frecuencia_compra": frecuencia,
         "ticket_promedio": ticket_promedio,
@@ -334,6 +332,25 @@ def metricas_dashboard() -> dict[str, Any]:
                 if avg_prob != avg_prob:
                     avg_prob = 0.0
 
+                # Predicciones por propension (completo)
+                cursor.execute(
+                    "SELECT propension, COUNT(*) AS n FROM predicciones GROUP BY propension"
+                )
+                propension_all = {r["propension"]: r["n"] for r in cursor.fetchall()}
+
+                # Transacciones por estado (incluye no pagados)
+                cursor.execute(
+                    "SELECT estado, COUNT(*) AS n FROM transacciones GROUP BY estado ORDER BY n DESC"
+                )
+                estados_all = [{"estado": r["estado"], "n": r["n"]} for r in cursor.fetchall()]
+
+                # Usuarios con/sin compras
+                cursor.execute(
+                    "SELECT COUNT(DISTINCT usuario_id) AS n FROM transacciones WHERE LOWER(TRIM(estado)) = 'pagado'"
+                )
+                usuarios_con_compra = cursor.fetchone()["n"]
+                usuarios_sin_compra = total_usuarios - usuarios_con_compra
+
                 # Top productos por transacciones
                 cursor.execute(
                     "SELECT p.categoria, COUNT(*) AS n FROM transacciones t JOIN productos p ON t.sku = p.sku GROUP BY p.categoria ORDER BY n DESC LIMIT 8"
@@ -354,10 +371,46 @@ def metricas_dashboard() -> dict[str, Any]:
         "probabilidad_promedio": round(avg_prob, 4),
         "regiones": regiones,
         "categorias_productos": categorias,
-        "estados_transacciones": estados,
+        "estados_transacciones": estados_all,
         "top_categorias_transacciones": top_cats_tx,
         "ultimas_predicciones": ultimas,
+        "propension_completa": propension_all,
+        "usuarios_con_compra": usuarios_con_compra,
+        "usuarios_sin_compra": usuarios_sin_compra,
+        "metricas_ia": {},
     }
+
+    # Obtener metricas del modelo de IA
+    metricas_ia = {}
+    try:
+        import httpx as _httpx
+        r = _httpx.get(f"{os.getenv('IA_SERVICE_URL', 'http://ia:8000')}/metricas", timeout=5.0)
+        if r.status_code == 200:
+            metricas_ia = r.json()
+    except Exception:
+        pass
+
+    # Inyectar metricas_ia en el resultado
+    result = {
+        "totales": {
+            "usuarios": total_usuarios,
+            "productos": total_productos,
+            "transacciones": total_transacciones,
+            "predicciones": total_predicciones,
+            "usuarios_con_compra": usuarios_con_compra,
+            "usuarios_sin_compra": usuarios_sin_compra,
+        },
+        "propension": propension_dist,
+        "propension_completa": propension_all,
+        "probabilidad_promedio": round(avg_prob, 4),
+        "regiones": regiones,
+        "categorias_productos": categorias,
+        "estados_transacciones": estados_all,
+        "top_categorias_transacciones": top_cats_tx,
+        "ultimas_predicciones": ultimas,
+        "metricas_ia": metricas_ia,
+    }
+    return result
 
 
 @app.get("/api/recomendaciones")
