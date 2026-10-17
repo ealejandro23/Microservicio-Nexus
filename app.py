@@ -110,6 +110,151 @@ def health() -> dict[str, str]:
     return {"status": "ok", "database": "connected"}
 
 
+# =============================================================================
+# ENDPOINTS ADICIONALES PARA EL FRONT (contrato esperado)
+# =============================================================================
+
+IA_SERVICE_URL = os.getenv("IA_SERVICE_URL", "http://ia:8000")
+
+
+@app.get("/usuarios")
+def listar_usuarios() -> list[dict[str, Any]]:
+    try:
+        with get_connection() as connection:
+            with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("SELECT usuario_id, region FROM usuarios ORDER BY usuario_id")
+                rows = cursor.fetchall()
+    except psycopg2.Error as exc:
+        raise HTTPException(status_code=503, detail="No fue posible consultar usuarios") from exc
+    return [{"usuario_id": r["usuario_id"], "region": r["region"]} for r in rows]
+
+
+@app.get("/categorias")
+def listar_categorias() -> list[str]:
+    try:
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT DISTINCT categoria FROM productos WHERE activo IS TRUE ORDER BY categoria")
+                rows = cursor.fetchall()
+    except psycopg2.Error as exc:
+        raise HTTPException(status_code=503, detail="No fue posible consultar categorias") from exc
+    return [r[0] for r in rows if r[0]]
+
+
+@app.get("/usuarios/{usuario_id}/historial")
+def historial_usuario(usuario_id: str) -> list[dict[str, Any]]:
+    try:
+        with get_connection() as connection:
+            with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    "SELECT sku, fecha, cantidad, total, estado FROM transacciones WHERE usuario_id = %s ORDER BY fecha DESC LIMIT 20",
+                    (usuario_id,),
+                )
+                rows = cursor.fetchall()
+    except psycopg2.Error as exc:
+        raise HTTPException(status_code=503, detail="No fue posible consultar historial") from exc
+    return [dict(r) for r in rows]
+
+
+@app.post("/predicciones")
+def crear_prediccion(payload: dict[str, Any]) -> dict[str, Any]:
+    usuario_id = payload.get("usuario_id")
+    categoria = payload.get("categoria")
+    if not usuario_id or not categoria:
+        raise HTTPException(status_code=422, detail="usuario_id y categoria son requeridos")
+
+    try:
+        with get_connection() as connection:
+            with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    "SELECT edad, acepta_marketing FROM usuarios WHERE usuario_id = %s",
+                    (usuario_id,),
+                )
+                user = cursor.fetchone()
+    except psycopg2.Error as exc:
+        raise HTTPException(status_code=503, detail="No fue posible consultar usuario") from exc
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    try:
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM transacciones WHERE usuario_id = %s AND LOWER(TRIM(estado)) = 'pagado'",
+                    (usuario_id,),
+                )
+                num_compras = cursor.fetchone()[0] or 0
+                cursor.execute(
+                    "SELECT COALESCE(SUM(total), 0) FROM transacciones WHERE usuario_id = %s AND LOWER(TRIM(estado)) = 'pagado'",
+                    (usuario_id,),
+                )
+                total_gastado = float(cursor.fetchone()[0] or 0)
+                cursor.execute(
+                    "SELECT MAX(fecha) FROM transacciones WHERE usuario_id = %s AND LOWER(TRIM(estado)) = 'pagado'",
+                    (usuario_id,),
+                )
+                ultima = cursor.fetchone()[0]
+                cursor.execute(
+                    "SELECT COUNT(DISTINCT pedido_id) FROM transacciones WHERE usuario_id = %s AND LOWER(TRIM(estado)) = 'pagado'",
+                    (usuario_id,),
+                )
+                frecuencia = cursor.fetchone()[0] or 0
+    except psycopg2.Error as exc:
+        raise HTTPException(status_code=503, detail="No fue posible calcular features") from exc
+
+    import datetime as _dt
+    if ultima is not None:
+        dias_ultima = (_dt.datetime.now() - ultima).days
+    else:
+        dias_ultima = 999
+    ticket_promedio = (total_gastado / num_compras) if num_compras > 0 else 0.0
+
+    features = {
+        "num_compras_categoria": num_compras,
+        "num_vistas_categoria": 0,
+        "num_clics_categoria": 0,
+        "total_gastado_categoria": total_gastado,
+        "dias_ultima_compra": max(dias_ultima, 0),
+        "frecuencia_compra": frecuencia,
+        "ticket_promedio": ticket_promedio,
+        "edad": int(user["edad"] or 30),
+        "acepta_marketing": int(user["acepta_marketing"] or 0),
+    }
+
+    try:
+        import httpx as _httpx
+
+        r = _httpx.post(f"{IA_SERVICE_URL}/predict", json=features, timeout=10.0)
+        r.raise_for_status()
+        ia_resp = r.json()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Servicio de IA no disponible: {exc}")
+
+    prob = float(ia_resp.get("prediccion", 0.0))
+    version_modelo = ia_resp.get("version_modelo", "1.0.0")
+
+    try:
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO predicciones (usuario_id, sku, categoria, prediccion, propension, version_modelo, tiempo_ms) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (usuario_id, "N/A", categoria, prob, "alta" if prob >= 0.7 else "media" if prob >= 0.4 else "baja", version_modelo, ia_resp.get("tiempo_ms", 0)),
+                )
+                pred_id = cursor.fetchone()[0]
+            connection.commit()
+    except psycopg2.Error as exc:
+        raise HTTPException(status_code=503, detail="No fue posible guardar prediccion") from exc
+
+    return {
+        "probabilidad_compra": prob,
+        "prediccion": 1 if prob >= 0.5 else 0,
+        "version_modelo": version_modelo,
+        "prediccion_id": pred_id,
+        "instancia": None,
+    }
+
+
 @app.get("/api/recomendaciones")
 def recomendaciones(
     usuario_id: str | None = Query(default=None, min_length=1),
