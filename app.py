@@ -255,6 +255,14 @@ def crear_prediccion(payload: dict[str, Any]) -> dict[str, Any]:
     prob = float(ia_resp.get("prediccion", 0.0))
     version_modelo = ia_resp.get("version_modelo", "1.0.0")
 
+    # =============================================================================
+    # CORRECCIÓN DE NEGOCIO: si el usuario ya compró en esta categoría antes,
+    # la probabilidad no debería ser demasiado baja. Un cliente recurrente tiene
+    # mayor propensión a volver a comprar en la misma categoría.
+    # =============================================================================
+    if num_compras > 0 and prob < 0.40:
+        prob = max(prob, 0.40)
+
     try:
         with get_connection() as connection:
             with connection.cursor() as cursor:
