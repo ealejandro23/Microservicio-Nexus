@@ -256,12 +256,31 @@ def crear_prediccion(payload: dict[str, Any]) -> dict[str, Any]:
     version_modelo = ia_resp.get("version_modelo", "1.0.0")
 
     # =============================================================================
-    # CORRECCIÓN DE NEGOCIO: si el usuario ya compró en esta categoría antes,
-    # la probabilidad no debería ser demasiado baja. Un cliente recurrente tiene
-    # mayor propensión a volver a comprar en la misma categoría.
+    # CORRECCIÓN DE NEGOCIO: el modelo de IA tiene problemas de calibración y
+    # da probabilidades muy bajas incluso con evidencia clara de compra previa.
+    # Aplicamos reglas de negocio basadas en el historial real del usuario.
     # =============================================================================
-    if num_compras > 0 and prob < 0.40:
-        prob = max(prob, 0.40)
+
+    # Regla 1: Si el usuario ya compró en esta categoría antes → probabilidad alta
+    if num_compras > 0:
+        prob = max(prob, 0.75)  # Al menos 75% si ya compró en la categoría
+        # Compra reciente (menos de 90 días) → aún más alto
+        if features["dias_ultima_compra"] < 90:
+            prob = max(prob, 0.85)
+        # Compra muy reciente (menos de 30 días) → muy alto
+        if features["dias_ultima_compra"] < 30:
+            prob = max(prob, 0.90)
+
+    # Regla 2: Si tiene vistas o clics en la categoría → interés demostrado
+    elif features["num_vistas_categoria"] > 0 or features["num_clics_categoria"] > 0:
+        prob = max(prob, 0.45)
+
+    # Regla 3: Si acepta marketing y la probabilidad es baja → pequeño boost
+    if int(user["acepta_marketing"] or 0) == 1 and prob < 0.60:
+        prob = min(prob * 1.30, 0.95)
+
+    # Asegurar rango válido
+    prob = max(0.0, min(1.0, prob))
 
     try:
         with get_connection() as connection:
